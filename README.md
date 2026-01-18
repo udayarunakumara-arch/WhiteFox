@@ -1,1 +1,1 @@
-I made this tool for pureply showcase nothing else 
+I made this tool for purely showcase nothing else 
